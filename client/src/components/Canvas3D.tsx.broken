@@ -1,0 +1,996 @@
+import { useEffect, useRef } from 'react';
+import { Canvas, useThree } from '@react-three/fiber';
+import { OrbitControls, GizmoHelper, GizmoViewport } from '@react-three/drei';
+import * as THREE from 'three';
+import { useRooms } from '../hooks/useRooms';
+import { Room, Point } from '../types';
+import { FOUNDATION_WALL_HEIGHT, FOUNDATION_WALL_THICKNESS, GRID_SIZE, SLAB_THICKNESS } from '../lib/constants';
+import { areRoomsTouching } from '../lib/geometry';
+
+// Global camera state for persistence across room selection
+let hasInitializedCamera = false;
+const lastCameraPosition = new THREE.Vector3(8, 8, 8);
+const lastCameraTarget = new THREE.Vector3(0, 0, 0);
+
+// Convert mesh units to architectural feet
+const unitsToFeet = (units: number) => units / GRID_SIZE;
+
+const Scene = () => {
+  // Get rooms data from context
+  const { rooms, selectedRoom, setSelectedRoom, phase } = useRooms();
+  
+  // References to hold meshes
+  const slabsRef = useRef<THREE.Group>(null);
+  const wallsRef = useRef<THREE.Group>(null);
+  
+  // Group rooms by connectivity
+  const roomGroups: Room[][] = [];
+  
+  // Clone the rooms array to avoid modifying the original
+  const ungroupedRooms = [...rooms];
+  
+  // Process all rooms to create groups of connected rooms
+  while (ungroupedRooms.length > 0) {
+    // Start a new group with the first remaining room
+    const currentGroup: Room[] = [ungroupedRooms.shift()!];
+    
+    // Find all rooms that touch this group
+    let groupChanged = true;
+    
+    while (groupChanged) {
+      groupChanged = false;
+      
+      // Check each ungrouped room
+      for (let i = ungroupedRooms.length - 1; i >= 0; i--) {
+        // Check if this room touches any room in the current group
+        const touchesGroup = currentGroup.some(groupRoom => 
+          areRoomsTouching(groupRoom, ungroupedRooms[i])
+        );
+        
+        if (touchesGroup) {
+          // Add to group and remove from ungrouped
+          currentGroup.push(ungroupedRooms[i]);
+          ungroupedRooms.splice(i, 1);
+          groupChanged = true;
+        }
+      }
+    }
+    
+    // Add this completed group to our collection
+    roomGroups.push(currentGroup);
+  }
+  
+  // Calculate bounding box of a set of rooms
+  const calculateBoundingBox = (rooms: Room[]): { x: number; y: number; width: number; height: number } => {
+    let minX = Infinity;
+    let minY = Infinity;
+    let maxX = -Infinity;
+    let maxY = -Infinity;
+    
+    rooms.forEach(room => {
+      minX = Math.min(minX, room.x);
+      minY = Math.min(minY, room.y);
+      maxX = Math.max(maxX, room.x + room.width);
+      maxY = Math.max(maxY, room.y + room.height);
+    });
+    
+    return {
+      x: minX,
+      y: minY,
+      width: maxX - minX,
+      height: maxY - minY
+    };
+  };
+
+  // Clear and rebuild the scene when rooms change or phase changes
+  useEffect(() => {
+    if (!slabsRef.current || !wallsRef.current) return;
+    
+    // Clear existing meshes
+    while (slabsRef.current.children.length > 0) {
+      slabsRef.current.remove(slabsRef.current.children[0]);
+    }
+    
+    while (wallsRef.current.children.length > 0) {
+      wallsRef.current.remove(wallsRef.current.children[0]);
+    }
+    
+    // Process each group of connected rooms
+    roomGroups.forEach(group => {
+      if (group.length === 1) {
+        // Single room - create a simple slab
+        const room = group[0];
+        const slab = createSingleRoomSlab(room);
+        
+        // Store the room ID for click handling
+        slab.userData.roomId = room.id;
+        
+        // Add to slabs group
+        slabsRef.current!.add(slab);
+        
+        // If in phase 2, add foundation walls
+        if (phase === 2) {
+          const wall = createFoundationWallsForSlab(slab);
+          wallsRef.current!.add(wall);
+        }
+      } else {
+        // Multiple connected rooms - create a union shape
+        const { slab, shape, centerX, centerY, width, depth } = createUnionSlab(group);
+        
+        // Store room IDs for click handling
+        group.forEach(room => {
+          // Find the specific mesh for this room in the group
+          const roomMesh = slab.children.find(child => 
+            child.position.x === unitsToFeet(room.x + room.width / 2) &&
+            child.position.y === unitsToFeet(room.y + room.height / 2)
+          );
+          
+          if (roomMesh) {
+            roomMesh.userData.roomId = room.id;
+          }
+        });
+        
+        // Add to slabs group
+        slabsRef.current!.add(slab);
+        
+        // If in phase 2, add foundation walls for the group
+        if (phase === 2) {
+          const walls = createCustomFoundationWalls(shape, centerX, centerY, width, depth, group);
+          if (walls) {
+            wallsRef.current!.add(walls);
+          }
+        }
+      }
+    });
+    
+    // Highlight the selected room if any
+    if (selectedRoom) {
+      highlightSelectedRoom(selectedRoom.id);
+    }
+  }, [rooms, selectedRoom, phase]);
+  
+  // Highlight the selected room
+  const highlightSelectedRoom = (roomId: number) => {
+    if (!slabsRef.current) return;
+    
+    // Reset all room colors
+    slabsRef.current.traverse(child => {
+      if (child instanceof THREE.Mesh && child.material instanceof THREE.MeshStandardMaterial) {
+        // Reset to default color
+        child.material.color.set(0xaaaaaa);
+        child.material.emissive.set(0x000000);
+      }
+    });
+    
+    // Find and highlight the selected room
+    slabsRef.current.traverse(child => {
+      if (child instanceof THREE.Mesh && 
+          child.userData && 
+          child.userData.roomId === roomId &&
+          child.material instanceof THREE.MeshStandardMaterial) {
+        // Highlight the selected room
+        child.material.color.set(0xffcc66);
+        child.material.emissive.set(0x553300);
+      }
+    });
+  };
+  
+  // Create a single room slab with proper dimensions
+  const createSingleRoomSlab = (room: Room): THREE.Mesh => {
+    // Create the slab geometry (width=X, height=Y, depth=Z)
+    const slabGeometry = new THREE.BoxGeometry(
+      unitsToFeet(room.width),     // X dimension
+      unitsToFeet(room.height),    // Y dimension
+      unitsToFeet(SLAB_THICKNESS)  // Z dimension (height)
+    );
+    
+    // Create a material
+    const slabMaterial = new THREE.MeshStandardMaterial({
+      color: 0xaaaaaa,
+      roughness: 0.8,
+      metalness: 0.1,
+      transparent: true,
+      opacity: 0.7,
+    });
+    
+    // Create the mesh
+    const slab = new THREE.Mesh(slabGeometry, slabMaterial);
+    
+    // Position at the room's center, with Z offset for slab thickness
+    slab.position.set(
+      unitsToFeet(room.x + room.width / 2),   // X position
+      unitsToFeet(room.y + room.height / 2),  // Y position
+      unitsToFeet(SLAB_THICKNESS / 2)         // Z position (half slab thickness above ground)
+    );
+    
+    return slab;
+  };
+  
+  // Create a union slab for multiple connected rooms
+  const createUnionSlab = (rooms: Room[]) => {
+    // Calculate the bounding box for centering
+    const bounds = calculateBoundingBox(rooms);
+    const centerX = unitsToFeet(bounds.x + bounds.width / 2);
+    const centerY = unitsToFeet(bounds.y + bounds.height / 2);
+    const width = unitsToFeet(bounds.width);  
+    const depth = unitsToFeet(bounds.height);
+    
+    // Create a group to hold all the individual room slabs
+    const slabGroup = new THREE.Group();
+    
+    // Add each room as a separate box to the group
+    rooms.forEach(room => {
+      // Create a box for this room
+      const roomGeometry = new THREE.BoxGeometry(
+        unitsToFeet(room.width),     // X dimension
+        unitsToFeet(room.height),    // Y dimension
+        unitsToFeet(SLAB_THICKNESS)  // Z dimension (height/thickness)
+      );
+      
+      const roomMaterial = new THREE.MeshStandardMaterial({
+        color: 0xaaaaaa,
+        roughness: 0.7,
+        metalness: 0.1,
+      });
+      
+      const roomMesh = new THREE.Mesh(roomGeometry, roomMaterial);
+      
+      // Position the room at its center point
+      roomMesh.position.set(
+        unitsToFeet(room.x + room.width / 2),  // X position
+        unitsToFeet(room.y + room.height / 2), // Y position
+        unitsToFeet(SLAB_THICKNESS / 2)        // Z position (half slab thickness above ground)
+      );
+      
+      // Add this room to the group
+      slabGroup.add(roomMesh);
+    });
+    
+    // Create an empty shape to use for walls later
+    const shape = new THREE.Shape();
+    
+    // For each room, add its outline to the shape (used for wall generation)
+    rooms.forEach((room, index) => {
+      // Convert room coordinates relative to center
+      const x1 = unitsToFeet(room.x) - centerX;
+      const x2 = unitsToFeet(room.x + room.width) - centerX;
+      const y1 = unitsToFeet(room.y) - centerY;
+      const y2 = unitsToFeet(room.y + room.height) - centerY;
+      
+      // For the first room, create the initial path
+      if (index === 0) {
+        shape.moveTo(x1, y1);
+        shape.lineTo(x2, y1);
+        shape.lineTo(x2, y2);
+        shape.lineTo(x1, y2);
+        shape.closePath();
+      } else {
+        // For subsequent rooms, create a separate path
+        const roomShape = new THREE.Shape();
+        roomShape.moveTo(x1, y1);
+        roomShape.lineTo(x2, y1);
+        roomShape.lineTo(x2, y2);
+        roomShape.lineTo(x1, y2);
+        roomShape.closePath();
+      }
+    });
+    
+    // Return the group and shape information for wall creation
+    return { 
+      slab: slabGroup, 
+      shape, 
+      centerX, 
+      centerY, 
+      width, 
+      depth 
+    };
+  };
+  
+  // Create a grid representation of all room cells
+  const createGridFromRooms = (rooms: Room[]) => {
+    // Find the bounding box of all rooms
+    let minX = Infinity;
+    let minY = Infinity;
+    let maxX = -Infinity;
+    let maxY = -Infinity;
+    
+    rooms.forEach(room => {
+      minX = Math.min(minX, room.x);
+      minY = Math.min(minY, room.y);
+      maxX = Math.max(maxX, room.x + room.width);
+      maxY = Math.max(maxY, room.y + room.height);
+    });
+    
+    // Create a grid with cell size of 12 inches (1 foot)
+    const cellSize = 12;
+    const gridWidth = Math.ceil((maxX - minX) / cellSize) + 1;
+    const gridHeight = Math.ceil((maxY - minY) / cellSize) + 1;
+    
+    // Initialize the grid with zeros
+    const grid: number[][] = Array(gridHeight).fill(0).map(() => Array(gridWidth).fill(0));
+    
+    // Fill grid cells that are covered by any room
+    rooms.forEach(room => {
+      const startGridX = Math.floor((room.x - minX) / cellSize);
+      const startGridY = Math.floor((room.y - minY) / cellSize);
+      const endGridX = Math.ceil((room.x + room.width - minX) / cellSize);
+      const endGridY = Math.ceil((room.y + room.height - minY) / cellSize);
+      
+      for (let y = startGridY; y < endGridY; y++) {
+        for (let x = startGridX; x < endGridX; x++) {
+          if (y >= 0 && y < gridHeight && x >= 0 && x < gridWidth) {
+            grid[y][x] = 1;
+          }
+        }
+      }
+    });
+    
+    return { grid, minX, minY, cellSize };
+  };
+  
+  // Create foundation walls that follow the perimeter of combined rooms
+  const createCustomFoundationWalls = (shape: THREE.Shape, centerX: number, centerY: number, width: number, depth: number, groupRooms: Room[]) => {
+    if (!wallsRef.current) return null;
+    
+    // Create a group to hold all the foundation walls
+    const wallsGroup = new THREE.Group();
+    
+    // Wall thickness and height
+    const wallThickness = unitsToFeet(FOUNDATION_WALL_THICKNESS);
+    const wallHeight = unitsToFeet(FOUNDATION_WALL_HEIGHT);
+    
+    // Wall material
+    const wallMaterial = new THREE.MeshStandardMaterial({
+      color: 0x777777,
+      roughness: 0.9,
+      metalness: 0.1
+    });
+    
+    // Create a grid representing the combined shape of the rooms
+    const { grid, minX, minY, cellSize } = createGridFromRooms(groupRooms);
+    
+    // Find the perimeter edges that should have walls
+    const edgeSegments = findPerimeterEdges(grid, minX, minY, cellSize);
+    
+    // Create wall segments for each edge on the perimeter
+    edgeSegments.forEach(segment => {
+      // Get segment points in feet
+      const startX = unitsToFeet(segment.startX);
+      const startY = unitsToFeet(segment.startY);
+      const endX = unitsToFeet(segment.endX);
+      const endY = unitsToFeet(segment.endY);
+      
+      // Determine if this is a horizontal or vertical wall segment
+      const isHorizontal = segment.direction === 'horizontal';
+      
+      // Create wall geometry based on segment orientation
+      const length = isHorizontal ? Math.abs(endX - startX) : Math.abs(endY - startY);
+      
+      // Create wall geometry
+      const wallGeometry = new THREE.BoxGeometry(
+        isHorizontal ? length : wallThickness,
+        isHorizontal ? wallThickness : length,
+        wallHeight
+      );
+      
+      const wall = new THREE.Mesh(wallGeometry, wallMaterial);
+      
+      // Position the wall
+      // For horizontal walls, the midpoint is halfway between startX and endX
+      // For vertical walls, the midpoint is halfway between startY and endY
+      const midX = (startX + endX) / 2;
+      const midY = (startY + endY) / 2;
+      
+      // Apply offset to position wall on the outside edge
+      const offsetX = isHorizontal ? 0 : (segment.isLeftOrTop ? -wallThickness/2 : wallThickness/2);
+      const offsetY = isHorizontal ? (segment.isLeftOrTop ? -wallThickness/2 : wallThickness/2) : 0;
+      
+      wall.position.set(
+        midX + offsetX - centerX,
+        midY + offsetY - centerY,
+        -wallHeight / 2 // Half height below ground
+      );
+      
+      wallsGroup.add(wall);
+    });
+    
+    return wallsGroup;
+  };
+  
+  // Find all perimeter edges of the combined room shape
+  const findPerimeterEdges = (grid: number[][], minX: number, minY: number, cellSize: number) => {
+    const edges: { 
+      startX: number; 
+      startY: number; 
+      endX: number; 
+      endY: number; 
+      direction: 'horizontal' | 'vertical';
+      isLeftOrTop: boolean; 
+    }[] = [];
+    
+    // Check horizontal edges (top and bottom of each cell)
+    for (let y = 0; y < grid.length; y++) {
+      let segmentStart: number | null = null;
+      
+      for (let x = 0; x < grid[0].length; x++) {
+        const current = grid[y][x];
+        const above = y > 0 ? grid[y-1][x] : 0;
+        
+        // Check top edge of cell
+        if (current === 1 && above === 0) {
+          // This is a top edge on the perimeter
+          if (segmentStart === null) {
+            segmentStart = x;
+          }
+        } else if (segmentStart !== null) {
+          // End of segment
+          edges.push({
+            startX: minX + segmentStart * cellSize,
+            startY: minY + y * cellSize,
+            endX: minX + x * cellSize,
+            endY: minY + y * cellSize,
+            direction: 'horizontal',
+            isLeftOrTop: true
+          });
+          segmentStart = null;
+        }
+      }
+      
+      // Handle segment that extends to edge
+      if (segmentStart !== null) {
+        edges.push({
+          startX: minX + segmentStart * cellSize,
+          startY: minY + y * cellSize,
+          endX: minX + grid[0].length * cellSize,
+          endY: minY + y * cellSize,
+          direction: 'horizontal',
+          isLeftOrTop: true
+        });
+      }
+      
+      // Check bottom edges
+      segmentStart = null;
+      for (let x = 0; x < grid[0].length; x++) {
+        const current = grid[y][x];
+        const below = y < grid.length - 1 ? grid[y+1][x] : 0;
+        
+        if (current === 1 && below === 0) {
+          // This is a bottom edge on the perimeter
+          if (segmentStart === null) {
+            segmentStart = x;
+          }
+        } else if (segmentStart !== null) {
+          // End of segment
+          edges.push({
+            startX: minX + segmentStart * cellSize,
+            startY: minY + (y+1) * cellSize, // Bottom edge
+            endX: minX + x * cellSize,
+            endY: minY + (y+1) * cellSize, // Bottom edge
+            direction: 'horizontal',
+            isLeftOrTop: false
+          });
+          segmentStart = null;
+        }
+      }
+      
+      // Handle segment that extends to edge
+      if (segmentStart !== null) {
+        edges.push({
+          startX: minX + segmentStart * cellSize,
+          startY: minY + (y+1) * cellSize, // Bottom edge
+          endX: minX + grid[0].length * cellSize,
+          endY: minY + (y+1) * cellSize, // Bottom edge
+          direction: 'horizontal',
+          isLeftOrTop: false
+        });
+      }
+    }
+    
+    // Check vertical edges (left and right of each cell)
+    for (let x = 0; x < grid[0].length; x++) {
+      let segmentStart: number | null = null;
+      
+      // Check left edges
+      for (let y = 0; y < grid.length; y++) {
+        const current = grid[y][x];
+        const left = x > 0 ? grid[y][x-1] : 0;
+        
+        if (current === 1 && left === 0) {
+          // This is a left edge on the perimeter
+          if (segmentStart === null) {
+            segmentStart = y;
+          }
+        } else if (segmentStart !== null) {
+          // End of segment
+          edges.push({
+            startX: minX + x * cellSize,
+            startY: minY + segmentStart * cellSize,
+            endX: minX + x * cellSize,
+            endY: minY + y * cellSize,
+            direction: 'vertical',
+            isLeftOrTop: true
+          });
+          segmentStart = null;
+        }
+      }
+      
+      // Handle segment that extends to edge
+      if (segmentStart !== null) {
+        edges.push({
+          startX: minX + x * cellSize,
+          startY: minY + segmentStart * cellSize,
+          endX: minX + x * cellSize,
+          endY: minY + grid.length * cellSize,
+          direction: 'vertical',
+          isLeftOrTop: true
+        });
+      }
+      
+      // Check right edges
+      segmentStart = null;
+      for (let y = 0; y < grid.length; y++) {
+        const current = grid[y][x];
+        const right = x < grid[0].length - 1 ? grid[y][x+1] : 0;
+        
+        if (current === 1 && right === 0) {
+          // This is a right edge on the perimeter
+          if (segmentStart === null) {
+            segmentStart = y;
+          }
+        } else if (segmentStart !== null) {
+          // End of segment
+          edges.push({
+            startX: minX + (x+1) * cellSize, // Right edge
+            startY: minY + segmentStart * cellSize,
+            endX: minX + (x+1) * cellSize, // Right edge
+            endY: minY + y * cellSize,
+            direction: 'vertical',
+            isLeftOrTop: false
+          });
+          segmentStart = null;
+        }
+      }
+      
+      // Handle segment that extends to edge
+      if (segmentStart !== null) {
+        edges.push({
+          startX: minX + (x+1) * cellSize, // Right edge
+          startY: minY + segmentStart * cellSize,
+          endX: minX + (x+1) * cellSize, // Right edge
+          endY: minY + grid.length * cellSize,
+          direction: 'vertical',
+          isLeftOrTop: false
+        });
+      }
+    }
+    
+    return edges;
+  };
+  
+  // Process each room
+    groupRooms.forEach(room => {
+      // Convert room coordinates to feet (global coords)
+      const x1 = unitsToFeet(room.x);
+      const y1 = unitsToFeet(room.y);
+      const x2 = unitsToFeet(room.x + room.width);
+      const y2 = unitsToFeet(room.y + room.height);
+      
+      // Room dimensions
+      const roomWidth = x2 - x1;
+      const roomHeight = y2 - y1;
+      
+      // Check which edges of the room should have a wall
+      // We'll create a wall if it's not adjacent to another room
+      const createTopWall = !groupRooms.some(other => {
+        if (other === room) return false; // Skip same room
+        const otherX1 = unitsToFeet(other.x);
+        const otherY1 = unitsToFeet(other.y);
+        const otherX2 = unitsToFeet(other.x + other.width);
+        const otherY2 = unitsToFeet(other.y + other.height);
+        
+        // Check if there's a room directly above (y1 = otherY2)
+        return (
+          Math.abs(y1 - otherY2) < 0.1 && // Bottom edge of other matches top edge of this
+          x1 < otherX2 && x2 > otherX1    // Horizontal overlap
+        );
+      });
+      
+      const createRightWall = !groupRooms.some(other => {
+        if (other === room) return false;
+        const otherX1 = unitsToFeet(other.x);
+        const otherY1 = unitsToFeet(other.y);
+        const otherX2 = unitsToFeet(other.x + other.width);
+        const otherY2 = unitsToFeet(other.y + other.height);
+        
+        // Check if there's a room to the right (x2 = otherX1)
+        return (
+          Math.abs(x2 - otherX1) < 0.1 && // Left edge of other matches right edge of this
+          y1 < otherY2 && y2 > otherY1    // Vertical overlap
+        );
+      });
+      
+      const createBottomWall = !groupRooms.some(other => {
+        if (other === room) return false;
+        const otherX1 = unitsToFeet(other.x);
+        const otherY1 = unitsToFeet(other.y);
+        const otherX2 = unitsToFeet(other.x + other.width);
+        const otherY2 = unitsToFeet(other.y + other.height);
+        
+        // Check if there's a room directly below (y2 = otherY1)
+        return (
+          Math.abs(y2 - otherY1) < 0.1 && // Top edge of other matches bottom edge of this
+          x1 < otherX2 && x2 > otherX1    // Horizontal overlap
+        );
+      });
+      
+      const createLeftWall = !groupRooms.some(other => {
+        if (other === room) return false;
+        const otherX1 = unitsToFeet(other.x);
+        const otherY1 = unitsToFeet(other.y);
+        const otherX2 = unitsToFeet(other.x + other.width);
+        const otherY2 = unitsToFeet(other.y + other.height);
+        
+        // Check if there's a room to the left (x1 = otherX2)
+        return (
+          Math.abs(x1 - otherX2) < 0.1 && // Right edge of other matches left edge of this
+          y1 < otherY2 && y2 > otherY1    // Vertical overlap
+        );
+      });
+      
+      // Create wall meshes for each edge that needs a wall
+      // Using simple BoxGeometry for clean walls
+      
+      // Top wall (north)
+      if (createTopWall) {
+        // Create a box for the top wall - positioned at midpoint of top edge
+        const topWallGeometry = new THREE.BoxGeometry(
+          roomWidth + wallThickness * 2, // Extend wall beyond corners
+          wallThickness,
+          wallHeight
+        );
+        
+        const topWall = new THREE.Mesh(topWallGeometry, wallMaterial);
+        
+        // Position relative to room
+        topWall.position.set(
+          (x1 + x2) / 2 - centerX, // Center X of room
+          y1 - wallThickness/2 - centerY, // Offset to outside edge
+          -wallHeight / 2 // Half height below ground
+        );
+        
+        wallsGroup.add(topWall);
+      }
+      
+      // Right wall (east)
+      if (createRightWall) {
+        // Create a box for the right wall
+        const rightWallGeometry = new THREE.BoxGeometry(
+          wallThickness,
+          roomHeight + (createTopWall ? 0 : wallThickness) + (createBottomWall ? 0 : wallThickness), // Adjust length
+          wallHeight
+        );
+        
+        const rightWall = new THREE.Mesh(rightWallGeometry, wallMaterial);
+        
+        // Position relative to room
+        rightWall.position.set(
+          x2 + wallThickness/2 - centerX, // Right edge
+          (y1 + y2) / 2 - centerY + (createTopWall ? wallThickness/2 : 0) - (createBottomWall ? wallThickness/2 : 0), // Center Y with adjustments
+          -wallHeight / 2 // Half height below ground
+        );
+        
+        wallsGroup.add(rightWall);
+      }
+      
+      // Bottom wall (south)
+      if (createBottomWall) {
+        const bottomWallGeometry = new THREE.BoxGeometry(
+          roomWidth + wallThickness * 2, // Extend wall beyond corners
+          wallThickness,
+          wallHeight
+        );
+        
+        const bottomWall = new THREE.Mesh(bottomWallGeometry, wallMaterial);
+        
+        // Position relative to room
+        bottomWall.position.set(
+          (x1 + x2) / 2 - centerX, // Center X of room
+          y2 + wallThickness/2 - centerY, // Offset to outside edge
+          -wallHeight / 2 // Half height below ground
+        );
+        
+        wallsGroup.add(bottomWall);
+      }
+      
+      // Left wall (west)
+      if (createLeftWall) {
+        // Create a box for the left wall
+        const leftWallGeometry = new THREE.BoxGeometry(
+          wallThickness,
+          roomHeight + (createTopWall ? 0 : wallThickness) + (createBottomWall ? 0 : wallThickness), // Adjust length
+          wallHeight
+        );
+        
+        const leftWall = new THREE.Mesh(leftWallGeometry, wallMaterial);
+        
+        // Position relative to room
+        leftWall.position.set(
+          x1 - wallThickness/2 - centerX, // Left edge
+          (y1 + y2) / 2 - centerY + (createTopWall ? wallThickness/2 : 0) - (createBottomWall ? wallThickness/2 : 0), // Center Y with adjustments
+          -wallHeight / 2 // Half height below ground
+        );
+        
+        wallsGroup.add(leftWall);
+      }
+      
+      // Add corner blocks where needed to fill gaps
+      // Top-left corner
+      if (createTopWall && createLeftWall) {
+        const cornerGeometry = new THREE.BoxGeometry(
+          wallThickness,
+          wallThickness,
+          wallHeight
+        );
+        
+        const corner = new THREE.Mesh(cornerGeometry, wallMaterial);
+        
+        corner.position.set(
+          x1 - wallThickness/2 - centerX,
+          y1 - wallThickness/2 - centerY,
+          -wallHeight / 2
+        );
+        
+        wallsGroup.add(corner);
+      }
+      
+      // Top-right corner
+      if (createTopWall && createRightWall) {
+        const cornerGeometry = new THREE.BoxGeometry(
+          wallThickness,
+          wallThickness,
+          wallHeight
+        );
+        
+        const corner = new THREE.Mesh(cornerGeometry, wallMaterial);
+        
+        corner.position.set(
+          x2 + wallThickness/2 - centerX,
+          y1 - wallThickness/2 - centerY,
+          -wallHeight / 2
+        );
+        
+        wallsGroup.add(corner);
+      }
+      
+      // Bottom-right corner
+      if (createBottomWall && createRightWall) {
+        const cornerGeometry = new THREE.BoxGeometry(
+          wallThickness,
+          wallThickness,
+          wallHeight
+        );
+        
+        const corner = new THREE.Mesh(cornerGeometry, wallMaterial);
+        
+        corner.position.set(
+          x2 + wallThickness/2 - centerX,
+          y2 + wallThickness/2 - centerY,
+          -wallHeight / 2
+        );
+        
+        wallsGroup.add(corner);
+      }
+      
+      // Bottom-left corner
+      if (createBottomWall && createLeftWall) {
+        const cornerGeometry = new THREE.BoxGeometry(
+          wallThickness,
+          wallThickness,
+          wallHeight
+        );
+        
+        const corner = new THREE.Mesh(cornerGeometry, wallMaterial);
+        
+        corner.position.set(
+          x1 - wallThickness/2 - centerX,
+          y2 + wallThickness/2 - centerY,
+          -wallHeight / 2
+        );
+        
+        wallsGroup.add(corner);
+      }
+    });
+    
+    return wallsGroup;
+  };
+  
+  // Create foundation walls for a single slab
+  const createFoundationWallsForSlab = (slab: THREE.Mesh): THREE.Mesh => {
+    // Compute bounding box if needed
+    if (!slab.geometry.boundingBox) {
+      slab.geometry.computeBoundingBox();
+    }
+    
+    const bbox = slab.geometry.boundingBox!;
+    
+    // Calculate dimensions
+    const width = slab.scale.x * (bbox.max.x - bbox.min.x);
+    const depth = slab.scale.y * (bbox.max.y - bbox.min.y);
+    const wallThickness = unitsToFeet(FOUNDATION_WALL_THICKNESS);
+    
+    // Calculate inner dimensions
+    const innerWidth = width - wallThickness * 2;
+    const innerDepth = depth - wallThickness * 2;
+    
+    // Create outer and inner shapes
+    const outerShape = new THREE.Shape();
+    outerShape.moveTo(-width/2, -depth/2);
+    outerShape.lineTo(width/2, -depth/2);
+    outerShape.lineTo(width/2, depth/2);
+    outerShape.lineTo(-width/2, depth/2);
+    outerShape.closePath();
+    
+    const innerShape = new THREE.Shape();
+    innerShape.moveTo(-innerWidth/2, -innerDepth/2);
+    innerShape.lineTo(innerWidth/2, -innerDepth/2);
+    innerShape.lineTo(innerWidth/2, innerDepth/2);
+    innerShape.lineTo(-innerWidth/2, innerDepth/2);
+    innerShape.closePath();
+    
+    // Add inner shape as hole in outer shape
+    outerShape.holes.push(innerShape);
+    
+    // Extrude settings for foundation wall 
+    const extrudeSettings = {
+      steps: 1,
+      depth: -unitsToFeet(FOUNDATION_WALL_HEIGHT),  // Negative to extrude downward
+      bevelEnabled: false
+    };
+    
+    // Create wall geometry and material
+    const wallGeometry = new THREE.ExtrudeGeometry(outerShape, extrudeSettings);
+    const wallMaterial = new THREE.MeshStandardMaterial({
+      color: 0x777777,
+      roughness: 0.9,
+      metalness: 0.1,
+      side: THREE.DoubleSide
+    });
+    
+    // Create wall mesh
+    const wall = new THREE.Mesh(wallGeometry, wallMaterial);
+    
+    // Position wall at the same XY as the slab, but at Z=0
+    wall.position.set(
+      slab.position.x,  // X position (same as slab)
+      slab.position.y,  // Y position (same as slab)
+      0                 // Z at ground level (0)
+    );
+    
+    return wall;
+  };
+  
+  // Handle clicks on room overlays
+  const handleClick = (event: { object: THREE.Object3D }) => {
+    if (event.object && event.object.userData && event.object.userData.roomId) {
+      const roomId = event.object.userData.roomId;
+      const clickedRoom = rooms.find((room: Room) => room.id === roomId);
+      if (clickedRoom) {
+        setSelectedRoom(clickedRoom);
+      }
+    }
+  };
+  
+  // Camera controls with persistent position
+  const CameraControls = () => {
+    const { camera } = useThree();
+    const controlsRef = useRef<any>(null);
+    
+    // Set up camera and controls
+    useEffect(() => {
+      if (!controlsRef.current) return;
+      
+      // Apply saved camera position if available
+      if (hasInitializedCamera) {
+        camera.position.copy(lastCameraPosition);
+        camera.up.set(0, 0, 1); // Z is up
+        controlsRef.current.target.copy(lastCameraTarget);
+      } else {
+        // First time initialization
+        camera.position.set(8, 8, 8);
+        camera.up.set(0, 0, 1); // Z is up
+        controlsRef.current.target.set(0, 0, 0);
+        hasInitializedCamera = true;
+      }
+      
+      // Force controls update
+      controlsRef.current.update();
+      
+      // Save camera state when controls change
+      const handleControlsChange = () => {
+        if (!controlsRef.current) return;
+        
+        // Save camera position
+        lastCameraPosition.copy(camera.position);
+        lastCameraTarget.copy(controlsRef.current.target);
+      };
+      
+      // Add change event listener
+      controlsRef.current.addEventListener('change', handleControlsChange);
+      
+      return () => {
+        controlsRef.current?.removeEventListener('change', handleControlsChange);
+      };
+    }, [camera, controlsRef.current]);
+    
+    // Configure OrbitControls for Z-up coordinate system
+    return (
+      <OrbitControls 
+        ref={controlsRef} 
+        makeDefault 
+        dampingFactor={0.3}
+        up={[0, 0, 1]} // Z is up
+      />
+    );
+  };
+  
+  // Return JSX for Scene component
+  return (
+    <>
+      <CameraControls />
+      
+      {/* Ambient light */}
+      <ambientLight intensity={0.5} />
+      
+      {/* Directional light */}
+      <directionalLight 
+        position={[10, 5, 10]} 
+        intensity={1} 
+        castShadow 
+        shadow-mapSize-width={1024} 
+        shadow-mapSize-height={1024}
+      />
+      
+      {/* Grid on the XY plane (Z=0) for Z-up system */}
+      <gridHelper args={[20, 20]} position={[0, 0, 0]} rotation={[Math.PI/2, 0, 0]} />
+      
+      {/* Slabs group */}
+      <group ref={slabsRef} onClick={handleClick} />
+      
+      {/* Foundation walls group */}
+      <group ref={wallsRef} />
+      
+      {/* Orientation helper */}
+      <GizmoHelper alignment="bottom-right" margin={[80, 80]}>
+        <GizmoViewport labelColor="white" axisColors={['red', 'green', 'blue']} />
+      </GizmoHelper>
+    </>
+  );
+};
+
+// 3D Canvas component
+const Canvas3D = () => {
+  return (
+    <div className="flex flex-col h-full">
+      <div className="flex justify-between items-center mb-2">
+        <h2 className="text-lg font-medium">3D Preview</h2>
+      </div>
+      
+      <div className="flex-1 bg-slate-800 border border-slate-200 rounded-md overflow-hidden">
+        <Canvas 
+          shadows 
+          gl={{ antialias: true }}
+          camera={{ position: [8, 8, 8], up: [0, 0, 1] }}
+        >
+          <color attach="background" args={["#1e293b"]} />
+          <Scene />
+        </Canvas>
+      </div>
+      
+      <div className="mt-2 text-xs text-slate-500">
+        Pan: right-click and drag | Zoom: mouse wheel | Orbit: left-click and drag
+      </div>
+    </div>
+  );
+};
+
+export default Canvas3D;

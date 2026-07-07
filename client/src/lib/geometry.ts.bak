@@ -1,0 +1,539 @@
+import { Room, Point, Edge } from "../types";
+import { GRID_SIZE, FOUNDATION_WALL_THICKNESS } from "../lib/constants";
+
+// Check if a point is inside a room
+export function isPointInRoom(point: Point, room: Room): boolean {
+  return (
+    point.x >= room.x &&
+    point.x <= room.x + room.width &&
+    point.y >= room.y &&
+    point.y <= room.y + room.height
+  );
+}
+
+// Calculate the combined perimeter of a group of rooms
+export function getCombinedRoomPerimeter(rooms: Room[]): Point[] {
+  if (rooms.length === 0) return [];
+  if (rooms.length === 1) {
+    const room = rooms[0];
+    return [
+      { x: room.x, y: room.y },
+      { x: room.x + room.width, y: room.y },
+      { x: room.x + room.width, y: room.y + room.height },
+      { x: room.x, y: room.y + room.height },
+      { x: room.x, y: room.y } // Close the loop
+    ];
+  }
+  
+  // For now, I'll just return points for each room rather than trying to calculate
+  // a unified perimeter, which is a more complex algorithm.
+  // Each calling function will handle drawing these points appropriately
+  const result: Point[] = [];
+  
+  rooms.forEach(room => {
+    result.push({ x: room.x, y: room.y });
+    result.push({ x: room.x + room.width, y: room.y });
+    result.push({ x: room.x + room.width, y: room.y + room.height });
+    result.push({ x: room.x, y: room.y + room.height });
+    result.push({ x: room.x, y: room.y }); // Close the loop
+  });
+  
+  return result;
+  for (let y = 0; y < gridHeight; y++) {
+    for (let x = 0; x < gridWidth; x++) {
+      if (grid[y][x] === 1) { // This is a filled cell
+        // Check if it has any empty neighbors
+        let hasEmptyNeighbor = false;
+        
+        for (const dir of directions) {
+          const nx = x + dir.dx;
+          const ny = y + dir.dy;
+          
+          // Out of bounds counts as empty
+          if (nx < 0 || ny < 0 || nx >= gridWidth || ny >= gridHeight || grid[ny][nx] === 0) {
+            hasEmptyNeighbor = true;
+            break;
+          }
+        }
+        
+        if (hasEmptyNeighbor) {
+          // This is a perimeter cell
+          perimeterCells.push({x, y});
+        }
+      }
+    }
+  }
+  
+  // First pass: Get all grid cells that represent the perimeter
+  // We'll use these to construct a clean orthogonal perimeter
+  const perimeterGridMap = new Map<string, {x: number, y: number}>();
+  perimeterCells.forEach(cell => {
+    perimeterGridMap.set(`${cell.x},${cell.y}`, cell);
+  });
+  
+  // Extract corners from the perimeter to get significant points
+  const cornerPoints: Point[] = [];
+  
+  // A cell is a corner if it has perimeter cells in exactly two perpendicular directions
+  for (const cell of perimeterCells) {
+    // Check the 4 neighboring cells to see if they're part of the perimeter
+    let perimeterNeighborCount = 0;
+    let horizontalNeighbors = 0;
+    let verticalNeighbors = 0;
+    
+    // Check right neighbor
+    if (perimeterGridMap.has(`${cell.x + 1},${cell.y}`)) {
+      perimeterNeighborCount++;
+      horizontalNeighbors++;
+    }
+    
+    // Check left neighbor
+    if (perimeterGridMap.has(`${cell.x - 1},${cell.y}`)) {
+      perimeterNeighborCount++;
+      horizontalNeighbors++;
+    }
+    
+    // Check down neighbor
+    if (perimeterGridMap.has(`${cell.x},${cell.y + 1}`)) {
+      perimeterNeighborCount++;
+      verticalNeighbors++;
+    }
+    
+    // Check up neighbor
+    if (perimeterGridMap.has(`${cell.x},${cell.y - 1}`)) {
+      perimeterNeighborCount++;
+      verticalNeighbors++;
+    }
+    
+    // A corner has exactly one horizontal and one vertical perimeter neighbor
+    if (horizontalNeighbors == 1 && verticalNeighbors == 1) {
+      cornerPoints.push({
+        x: minX + cell.x * gridCellSize,
+        y: minY + cell.y * gridCellSize
+      });
+    }
+  }
+  
+  // If we have corner points, use these to construct an orthogonal perimeter
+  // If there are no corners (like a circle), fall back to the old method
+  if (cornerPoints.length >= 3) {
+    // Sort the corner points in clockwise order
+    // First, find the center of the points
+    let centerX = 0, centerY = 0;
+    cornerPoints.forEach(p => {
+      centerX += p.x;
+      centerY += p.y;
+    });
+    centerX /= cornerPoints.length;
+    centerY /= cornerPoints.length;
+    
+    // Sort corners by angle around the center
+    cornerPoints.sort((a, b) => {
+      const angleA = Math.atan2(a.y - centerY, a.x - centerX);
+      const angleB = Math.atan2(b.y - centerY, b.x - centerX);
+      return angleA - angleB;
+    });
+    
+    // Add the first point again to close the loop
+    if (cornerPoints.length > 0) {
+      cornerPoints.push({...cornerPoints[0]});
+    }
+    
+    // Snap points to the GRID_SIZE (foot level) for cleaner edges
+    const snappedCorners = cornerPoints.map(point => {
+      const snapX = Math.round(point.x / GRID_SIZE) * GRID_SIZE;
+      const snapY = Math.round(point.y / GRID_SIZE) * GRID_SIZE;
+      
+      // Only snap if the point is close to a grid line (within 3 inches)
+      const snapThreshold = 3;
+      
+      return {
+        x: Math.abs(point.x - snapX) < snapThreshold ? snapX : point.x,
+        y: Math.abs(point.y - snapY) < snapThreshold ? snapY : point.y
+      };
+    });
+    
+    // Ensure the perimeter is orthogonal by adding additional points where needed
+    const orthogonalPerimeter: Point[] = [];
+    
+    for (let i = 0; i < snappedCorners.length - 1; i++) {
+      const current = snappedCorners[i];
+      const next = snappedCorners[i + 1];
+      
+      // Add the current point
+      orthogonalPerimeter.push(current);
+      
+      // Check if we need to add an intermediate point to maintain an orthogonal path
+      if (Math.abs(current.x - next.x) > 1 && Math.abs(current.y - next.y) > 1) {
+        // This is a diagonal move - add an intermediate point to make it two orthogonal moves
+        orthogonalPerimeter.push({x: next.x, y: current.y});
+      }
+    }
+    
+    return orthogonalPerimeter;
+  }
+  
+  // Fallback to the old method if we couldn't identify corners well
+  // Sort perimeter cells to form a continuous boundary
+  const sortedPerimeterPoints: Point[] = [];
+  
+  if (perimeterCells.length > 0) {
+    // Start with the leftmost cell
+    let startCell = perimeterCells[0];
+    for (const cell of perimeterCells) {
+      if (cell.x < startCell.x || (cell.x === startCell.x && cell.y < startCell.y)) {
+        startCell = cell;
+      }
+    }
+    
+    // Convert to world coordinates
+    sortedPerimeterPoints.push({
+      x: minX + startCell.x * gridCellSize,
+      y: minY + startCell.y * gridCellSize
+    });
+    
+    // Find the path by using a chain approach (always pick the closest unvisited perimeter cell)
+    const visited = new Set<string>();
+    visited.add(`${startCell.x},${startCell.y}`);
+    
+    let currentCell = startCell;
+    
+    // Try to form a continuous path by picking the closest neighbor each time
+    while (visited.size < perimeterCells.length) {
+      let closestCell = null;
+      let minDistance = Infinity;
+      
+      // Find the nearest unvisited perimeter cell
+      for (const cell of perimeterCells) {
+        const key = `${cell.x},${cell.y}`;
+        if (!visited.has(key)) {
+          // Manhattan distance (for speed)
+          const distance = Math.abs(cell.x - currentCell.x) + Math.abs(cell.y - currentCell.y);
+          
+          if (distance < minDistance) {
+            minDistance = distance;
+            closestCell = cell;
+          }
+        }
+      }
+      
+      if (closestCell) {
+        // Convert to world coordinates
+        sortedPerimeterPoints.push({
+          x: minX + closestCell.x * gridCellSize,
+          y: minY + closestCell.y * gridCellSize
+        });
+        
+        visited.add(`${closestCell.x},${closestCell.y}`);
+        currentCell = closestCell;
+      } else {
+        // Can't find any more reachable cells
+        break;
+      }
+    }
+    
+    // Close the loop
+    if (sortedPerimeterPoints.length > 0) {
+      sortedPerimeterPoints.push({
+        x: sortedPerimeterPoints[0].x,
+        y: sortedPerimeterPoints[0].y
+      });
+    }
+  }
+  
+  // Simplify the perimeter by removing redundant points
+  if (sortedPerimeterPoints.length <= 2) {
+    return sortedPerimeterPoints;
+  }
+  
+  // Keep only points that form significant angles
+  const simplifiedPoints: Point[] = [sortedPerimeterPoints[0]];
+  
+  for (let i = 1; i < sortedPerimeterPoints.length - 1; i++) {
+    const prev = simplifiedPoints[simplifiedPoints.length - 1];
+    const curr = sortedPerimeterPoints[i];
+    const next = sortedPerimeterPoints[i + 1];
+    
+    // Calculate the vectors between points
+    const v1x = curr.x - prev.x;
+    const v1y = curr.y - prev.y;
+    const v2x = next.x - curr.x;
+    const v2y = next.y - curr.y;
+    
+    // Normalize the vectors
+    const len1 = Math.sqrt(v1x*v1x + v1y*v1y);
+    const len2 = Math.sqrt(v2x*v2x + v2y*v2y);
+    
+    // Avoid division by zero
+    if (len1 > 0 && len2 > 0) {
+      const nx1 = v1x / len1;
+      const ny1 = v1y / len1; 
+      const nx2 = v2x / len2;
+      const ny2 = v2y / len2;
+      
+      // Calculate dot product to determine angle
+      const dotProduct = nx1 * nx2 + ny1 * ny2;
+      
+      // If the angle is significant (not close to 180 degrees), keep the point
+      if (Math.abs(dotProduct) < 0.99) {
+        simplifiedPoints.push(curr);
+      }
+    }
+  }
+  
+  // Add the last point
+  simplifiedPoints.push(sortedPerimeterPoints[sortedPerimeterPoints.length - 1]);
+  
+  // Snap points to grid when close to 1-foot increments
+  const snappedPoints = simplifiedPoints.map(point => {
+    const snapX = Math.round(point.x / GRID_SIZE) * GRID_SIZE;
+    const snapY = Math.round(point.y / GRID_SIZE) * GRID_SIZE;
+    
+    // Snap if within 3 inches
+    const snapThreshold = 3;
+    
+    return {
+      x: Math.abs(point.x - snapX) < snapThreshold ? snapX : point.x,
+      y: Math.abs(point.y - snapY) < snapThreshold ? snapY : point.y
+    };
+  });
+  
+  return snappedPoints;
+}
+
+// Check if two edges coincide (are the same line segment)
+function areEdgesCoincident(edge1: Edge, edge2: Edge): boolean {
+  const tolerance = 0.1; // Small tolerance for floating point comparison
+  
+  // Check if the endpoints match (in either direction)
+  const sameDirection = 
+    Math.abs(edge1.x1 - edge2.x1) < tolerance && 
+    Math.abs(edge1.y1 - edge2.y1) < tolerance && 
+    Math.abs(edge1.x2 - edge2.x2) < tolerance && 
+    Math.abs(edge1.y2 - edge2.y2) < tolerance;
+  
+  const oppositeDirection = 
+    Math.abs(edge1.x1 - edge2.x2) < tolerance && 
+    Math.abs(edge1.y1 - edge2.y2) < tolerance && 
+    Math.abs(edge1.x2 - edge2.x1) < tolerance && 
+    Math.abs(edge1.y2 - edge2.y1) < tolerance;
+  
+  return sameDirection || oppositeDirection;
+}
+
+// Check if two rooms intersect
+export function doRoomsIntersect(room1: Room, room2: Room): boolean {
+  return !(
+    room1.x + room1.width <= room2.x ||
+    room1.x >= room2.x + room2.width ||
+    room1.y + room1.height <= room2.y ||
+    room1.y >= room2.y + room2.height
+  );
+}
+
+// Check if rooms are overlapping by exactly 1' (Condition 3)
+export function areRoomsOverlapping(room1: Room, room2: Room): boolean {
+  // Define the overlap tolerance (1 grid unit/1 foot)
+  const overlapTolerance = GRID_SIZE;
+  
+  // Check horizontal overlap - ensuring it's no more than one grid unit
+  const horizontalOverlap = 
+    (room1.x + room1.width > room2.x && room1.x + room1.width <= room2.x + overlapTolerance) || 
+    (room2.x + room2.width > room1.x && room2.x + room2.width <= room1.x + overlapTolerance);
+  
+  // Check vertical overlap - ensuring it's no more than one grid unit
+  const verticalOverlap = 
+    (room1.y + room1.height > room2.y && room1.y + room1.height <= room2.y + overlapTolerance) || 
+    (room2.y + room2.height > room1.y && room2.y + room2.height <= room1.y + overlapTolerance);
+  
+  // Check significant overlap in both directions
+  const significantOverlap = doRoomsIntersect(room1, room2) && (
+    // Check if overlap is more than just edge/corner
+    Math.min(room1.x + room1.width, room2.x + room2.width) - Math.max(room1.x, room2.x) > overlapTolerance &&
+    Math.min(room1.y + room1.height, room2.y + room2.height) - Math.max(room1.y, room2.y) > overlapTolerance
+  );
+  
+  // Return true for overlap condition (Condition 3)
+  return doRoomsIntersect(room1, room2) && !significantOverlap;
+}
+
+// Check if two rooms are adjacent (sharing an edge - Condition 2)
+export function areRoomsAdjacent(room1: Room, room2: Room): boolean {
+  // Rooms are adjacent if they share an edge
+  const horizontalAdjacent = (
+    (room1.x <= room2.x + room2.width && room1.x + room1.width >= room2.x) &&
+    (room1.y === room2.y + room2.height || room2.y === room1.y + room1.height)
+  );
+  
+  const verticalAdjacent = (
+    (room1.y <= room2.y + room2.height && room1.y + room1.height >= room2.y) &&
+    (room1.x === room2.x + room2.width || room2.x === room1.x + room1.width)
+  );
+  
+  return horizontalAdjacent || verticalAdjacent;
+}
+
+// Check if two rooms are touching (either adjacent, sharing a corner, or overlapping - Condition 2 or 3)
+export function areRoomsTouching(room1: Room, room2: Room): boolean {
+  // Check if rooms are adjacent (share an edge - Condition 2)
+  if (areRoomsAdjacent(room1, room2)) {
+    return true;
+  }
+  
+  // Check if rooms are overlapping by 1' (Condition 3)
+  if (areRoomsOverlapping(room1, room2)) {
+    return true;
+  }
+  
+  // Expand room1 slightly to check for corner touches
+  const expandedRoom1 = {
+    ...room1,
+    x: room1.x - 1,
+    y: room1.y - 1,
+    width: room1.width + 2,
+    height: room1.height + 2
+  };
+  
+  // Check if the expanded room intersects with room2 (corner touch)
+  return doRoomsIntersect(expandedRoom1, room2);
+}
+
+// Calculate distance between two points
+export function distanceBetweenPoints(p1: Point, p2: Point): number {
+  return Math.sqrt(Math.pow(p2.x - p1.x, 2) + Math.pow(p2.y - p1.y, 2));
+}
+
+// Get center point of a room
+export function getRoomCenter(room: Room): Point {
+  return {
+    x: room.x + room.width / 2,
+    y: room.y + room.height / 2
+  };
+}
+
+// Normalize a rectangle to ensure width and height are positive
+export function normalizeRectangle(start: Point, end: Point): { x: number; y: number; width: number; height: number } {
+  const x = Math.min(start.x, end.x);
+  const y = Math.min(start.y, end.y);
+  const width = Math.abs(end.x - start.x);
+  const height = Math.abs(end.y - start.y);
+  
+  return { x, y, width, height };
+}
+
+// Special offset function for orthogonal (90-degree cornered) perimeters
+// This creates a proper offset with 90-degree corners for foundation wall inner boundaries
+export function createInsetPolyline(perimeterPoints: Point[], insetDistance: number): Point[] {
+  if (perimeterPoints.length < 3) return [];
+
+  // Make sure we have a closed perimeter - check if first and last points match
+  const isPerimeterClosed = 
+    Math.abs(perimeterPoints[0].x - perimeterPoints[perimeterPoints.length - 1].x) < 0.0001 &&
+    Math.abs(perimeterPoints[0].y - perimeterPoints[perimeterPoints.length - 1].y) < 0.0001;
+  
+  // Create a working copy, ensuring the path is closed
+  const closedPerimeter = isPerimeterClosed ? 
+    [...perimeterPoints] : 
+    [...perimeterPoints, {...perimeterPoints[0]}];
+  
+  // The offset polygon needs to be built one corner at a time
+  const offsetPolygon: Point[] = [];
+  
+  // Identify each corner and determine its type
+  for (let i = 0; i < closedPerimeter.length - 1; i++) {
+    const prev = i === 0 ? closedPerimeter[closedPerimeter.length - 2] : closedPerimeter[i - 1];
+    const current = closedPerimeter[i];
+    const next = closedPerimeter[i + 1];
+    
+    // We only care about true corners (where direction changes)
+    const incomingIsHorizontal = Math.abs(current.y - prev.y) < 0.0001;
+    const outgoingIsHorizontal = Math.abs(next.y - current.y) < 0.0001;
+    
+    // Skip non-corner points (where the direction doesn't change)
+    if (incomingIsHorizontal === outgoingIsHorizontal) continue;
+    
+    // For 90-degree corners, we need to determine if it's an inside or outside corner
+    // and offset it accordingly
+    
+    // Get the directions of the incoming and outgoing segments
+    const incomingVector = {
+      x: current.x - prev.x,
+      y: current.y - prev.y
+    };
+    
+    const outgoingVector = {
+      x: next.x - current.x,
+      y: next.y - current.y
+    };
+    
+    // For orthogonal shapes, one will be (±1,0) and the other (0,±1)
+    // The cross product determines if it's an outside (convex) or inside (concave) corner
+    const crossProductZ = incomingVector.x * outgoingVector.y - incomingVector.y * outgoingVector.x;
+    const isOutsideCorner = crossProductZ < 0;
+    
+    // For outside corners, we need to offset in both directions
+    // For inside corners, the corner moves directly inward
+    let offsetCorner: Point;
+    
+    if (isOutsideCorner) {
+      // Outside corner - offset in both directions
+      // For 90-degree outside corners, we move inward by the offset distance in both directions
+      offsetCorner = {
+        x: current.x + (incomingIsHorizontal ? 0 : Math.sign(incomingVector.x) * -insetDistance) + 
+                     (outgoingIsHorizontal ? 0 : Math.sign(outgoingVector.x) * -insetDistance),
+        y: current.y + (incomingIsHorizontal ? Math.sign(incomingVector.y) * -insetDistance : 0) + 
+                     (outgoingIsHorizontal ? Math.sign(outgoingVector.y) * -insetDistance : 0)
+      };
+    } else {
+      // Inside corner - offset in the appropriate direction
+      // For 90-degree inside corners, we move inward by the offset distance
+      offsetCorner = {
+        x: current.x + (incomingIsHorizontal ? 0 : Math.sign(incomingVector.x) * -insetDistance),
+        y: current.y + (incomingIsHorizontal ? Math.sign(incomingVector.y) * -insetDistance : 0)
+      };
+      
+      // For inside corners, we need a second point to maintain the 90-degree corner
+      const secondCorner = {
+        x: current.x + (outgoingIsHorizontal ? 0 : Math.sign(outgoingVector.x) * -insetDistance),
+        y: current.y + (outgoingIsHorizontal ? Math.sign(outgoingVector.y) * -insetDistance : 0)
+      };
+      
+      // Add both points to create the 90-degree inside corner
+      offsetPolygon.push(offsetCorner);
+      offsetPolygon.push(secondCorner);
+      
+      // We've handled this corner completely, so continue to the next one
+      continue;
+    }
+    
+    // Add the corner to our offset polygon
+    offsetPolygon.push(offsetCorner);
+  }
+  
+  // Special case for orthogonal building perimeters:
+  // If we're processing a rectangular perimeter, we need to ensure we generate 4 corners
+  if (offsetPolygon.length === 0) {
+    // Assuming it's a simple rectangle, get the bounding box and offset it
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    
+    for (const pt of perimeterPoints) {
+      minX = Math.min(minX, pt.x);
+      minY = Math.min(minY, pt.y);
+      maxX = Math.max(maxX, pt.x);
+      maxY = Math.max(maxY, pt.y);
+    }
+    
+    // Create the inset rectangle
+    offsetPolygon.push({ x: minX + insetDistance, y: minY + insetDistance });
+    offsetPolygon.push({ x: maxX - insetDistance, y: minY + insetDistance });
+    offsetPolygon.push({ x: maxX - insetDistance, y: maxY - insetDistance });
+    offsetPolygon.push({ x: minX + insetDistance, y: maxY - insetDistance });
+  }
+  
+  // Close the path
+  if (offsetPolygon.length > 0) {
+    offsetPolygon.push({ ...offsetPolygon[0] });
+  }
+  
+  return offsetPolygon;
+}

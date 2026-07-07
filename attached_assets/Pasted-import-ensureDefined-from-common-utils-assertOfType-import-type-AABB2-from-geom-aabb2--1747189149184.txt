@@ -1,0 +1,150 @@
+import { ensureDefined } from "common/utils/assertOfType";
+import type { AABB2 } from "geom/aabb2";
+import type { DebugPolyLine2Options, DebugTextOptions, DebugPoint2Options } from "geom/debugTypes";
+import type { Line2Segment } from "geom/line2";
+import { polyLine2Edge, polyLine2AABB2 } from "geom/polyLine2";
+import type { PolyLine2 } from "geom/polyLine2Types";
+import { polyLine2New } from "geom/polyLine2Types";
+import type { SkeletonConfig } from "geom/straightSkeleton/skeletonTypes";
+import { offsetPolyLine2SSkDebug } from "geom/straightSkeleton/straightSkeleton";
+import Canvas2D from "lib/components/debug/Canvas2D";
+import Input from "lib/components/Input";
+import useQueryParams from "lib/hooks/useQueryParams";
+import { useEffect, useState } from "react";
+import { straightSkeletonTests } from "../../../../../test/unit/geom/straightSkeleton/fixtures";
+import { round } from "../../../../../test/unit/visual/visual.util";
+
+const spacing = 200;
+const size = 90;
+const min = -50;
+
+export default function Offset() {
+  const { id, startOffset } = useQueryParams(["id", "startOffset"]);
+  const [pl, setPl] = useState<PolyLine2>(polyLine2New([]));
+  const [offset, setOffset] = useState<number>(0);
+  const [lines, setLines] = useState<DebugPolyLine2Options[]>([]);
+  const [dynamicLines, setDynamicLines] = useState<DebugPolyLine2Options[]>([]);
+  const [dynamicText, setDyanmicText] = useState<DebugTextOptions[]>([]);
+  const [text, setText] = useState<DebugTextOptions[]>([]);
+  const [points] = useState<DebugPoint2Options[]>([]);
+  const [aabb, setAAABB] = useState<AABB2 | undefined>(undefined);
+
+  useEffect(() => {
+    if (startOffset === undefined) {
+      return;
+    }
+    const parsed = parseFloat(startOffset);
+    if (isNaN(parsed)) {
+      return;
+    }
+    setOffset(parsed);
+  }, [startOffset]);
+
+  useEffect(() => {
+    if (id === undefined) {
+      return;
+    }
+    const test = straightSkeletonTests(size).find((test) => test.id === id);
+    if (test === undefined) {
+      return;
+    }
+    const { generator, offsets } = test;
+
+    const pl = polyLine2New(generator);
+
+    setAAABB(polyLine2AABB2(pl));
+
+    const resultText: DebugTextOptions[] = [];
+    const resultLines: DebugPolyLine2Options[] = [{ pline: pl, mat: 0x000000, numberEdges: 0.05 }];
+    for (const offset of offsets) {
+      // function under test
+      const resultLine = offsetPolyLine2SSkDebug(pl, offset);
+
+      resultText.push({ text: `${round(offset)}`, scale: 6, x: resultLine[0], y: resultLine[1] });
+      resultLines.push({ pline: resultLine, mat: 0x00cccc });
+    }
+
+    setPl(pl);
+    setText(resultText);
+    setLines(resultLines);
+  }, [id]);
+
+  useEffect(() => {
+    const cfg: SkeletonConfig = {
+      debug: { lines: [] as DebugPolyLine2Options[], text: [] as DebugTextOptions[] },
+      newToOld: [],
+    };
+
+    // function under test
+    const resultLine = offsetPolyLine2SSkDebug(pl, offset, undefined, cfg);
+
+    const resultLines = [{ pline: resultLine, mat: 0xff0000 }];
+    for (const line of ensureDefined(ensureDefined(cfg.debug).lines)) {
+      resultLines.push({ ...line, mat: 0xffdddd });
+    }
+
+    for (let i = 0; i < ensureDefined(cfg.newToOld).length; i++) {
+      const oldId = ensureDefined(cfg.newToOld)[i];
+      const [x0, y0, x1, y1] = polyLine2Edge(resultLine, i) as unknown as Line2Segment;
+      ensureDefined(ensureDefined(cfg.debug).text).push({
+        text: `${i}: ${oldId}`,
+        scale: 10,
+        x: (x0 + x1) / 2,
+        y: (y0 + y1) / 2,
+      });
+    }
+
+    setDynamicLines(resultLines);
+    setDyanmicText(ensureDefined(ensureDefined(cfg.debug).text));
+  }, [pl, offset, setOffset]);
+
+  const width = 1640;
+  const height = 960;
+
+  let minAdjust: [number, number] = [0, 0];
+  let scale = 1;
+  if (aabb) {
+    scale = Math.min((0.5 * width) / (aabb.maxX - aabb.minX), (0.5 * height) / (aabb.maxY - aabb.minY));
+    minAdjust = [-aabb.minX + spacing / scale, -aabb.minY + spacing / scale];
+  }
+
+  const allLines = [...lines, ...dynamicLines];
+  const alltext = [...text, ...dynamicText];
+  return (
+    <>
+      <Canvas2D
+        width={width}
+        height={height}
+        text={alltext}
+        points={points}
+        lines={allLines}
+        offset={minAdjust}
+        scale={scale}
+      />
+      <div
+        style={{
+          background: "#dddddd",
+          width: "calc(100% - 20px)",
+          float: "left",
+          position: "absolute",
+          top: "5px",
+          left: "5px",
+        }}
+      >
+        <Input
+          style={{ width: "100%" }}
+          type="range"
+          min={min}
+          max={size}
+          step={0.001}
+          value={offset}
+          onChange={(e) => setOffset(parseFloat(e.target.value))}
+        />
+        offset:{" "}
+        <a href={`straight-skeleton-offset-single?id=${id}&startOffset=${offset}`}>
+          <b>{offset}</b>
+        </a>
+      </div>
+    </>
+  );
+}

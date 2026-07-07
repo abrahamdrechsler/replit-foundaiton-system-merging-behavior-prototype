@@ -1,0 +1,158 @@
+🧱 PRD: CAD/BIM Drafting Environment Prototype (Phase 1 & 2)
+
+Overview
+
+This prototype explores core interactions for a room-based drafting tool designed for architectural modeling with automated foundation systems. Built for use in a 2D/3D drafting environment, the prototype enables geometric reasoning, snapping, booleans, and simple component management. The tool will help evaluate UX flows and logic for integration into a full-featured CAD/BIM platform.
+
+Goals
+
+Draw rooms as 2D rectangles that automatically generate corresponding 3D foundation slabs.
+
+Implement snapping logic to allow precise connections between rooms.
+
+Allow visual inspection and manipulation of rooms via an inspector panel.
+
+Add a 3D preview that reflects slab geometry and interaction.
+
+In Phase 2, generate foundation walls around slab perimeters.
+
+Scope
+
+✅ In Scope
+
+Room drawing and snapping (2D)
+
+Auto-generated slab creation and booleans
+
+2D/3D geometry synchronization
+
+Room inspector: rename, delete, assign color
+
+Foundation wall creation (Phase 2)
+
+❌ Out of Scope
+
+Room resizing or freeform reshaping
+
+Layers, materials, structural framing
+
+Multi-level/floor support
+
+Phase 1: Rooms and Slabs
+
+1. Canvas & Drawing
+
+The 2D canvas appears on the left side of the screen.
+
+Canvas includes a visible grid with 1-foot snapping increments.
+
+User draws a room by:
+
+Clicking to set the first corner.
+
+Clicking again to set the opposite corner.
+
+Rooms are represented as axis-aligned rectangles.
+
+Room overlap is prohibited during both creation and movement.
+
+Movement via arrow keys only (1' increments), with overlap checking.
+
+A button in the top-right of the 2D canvas initiates room drawing mode.
+
+2. Snapping Logic
+
+Always enabled.
+
+Snap points include:
+
+Room perimeter corners
+
+Midpoints of edges
+
+Intersections between rooms
+
+Snapping precision aligns with the grid (1’ increments).
+
+3. Slab Generation
+
+Each room automatically generates a 3D slab.
+
+Slab characteristics:
+
+Horizontal rectangular extrusion
+
+Dimensions match room extents
+
+Fixed 12" thickness
+
+Slabs boolean together when adjacent or touching — no simplification or merging of disjoint slabs.
+
+Physically separated rooms produce independent slabs.
+
+4. 3D Preview
+
+Displayed on the right side of the screen.
+
+Shows:
+
+All slabs
+
+Booleaned slab unions
+
+Transparent colored overlays matching assigned room color
+
+User interactions:
+
+Pan: right-click and drag
+
+Zoom: mouse wheel
+
+Orbit: left-click and drag
+
+5. Room Interaction & Inspector
+
+Clicking a room in 2D or its corresponding slab in 3D selects it.
+
+The Room Inspector appears on the far right:
+
+Rename room
+
+Delete room
+
+Assign a color
+
+Color assignment updates:
+
+2D room fill (semi-transparent)
+
+3D slab overlay (semi-transparent)
+
+Phase 2: Foundation Walls
+
+6. Foundation Wall Generation
+
+Generate a single perimeter wall around each booleaned slab group.
+
+FDN wall geometry:
+
+12" thick
+
+Extrudes downward from bottom of slab by 3'
+
+In plan view, outside face aligns with outside face of slab
+
+Mitered corners
+
+Multiple unconnected slab groups = multiple FDN wall boundaries.
+
+Future Considerations (Not in Prototype)
+
+Editing wall alignment offsets
+
+Sloped or stepped foundations
+
+Structural framing, openings, or annotations
+
+Topography or terrain interaction
+
